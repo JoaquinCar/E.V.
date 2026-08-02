@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────
+#  Ronda proactiva de E.V.
+#  Se despierta sola, revisa el vault y avisa por notificación.
+#
+#  uso:
+#    ronda                  corre una ronda ahora
+#    ronda --voz            además de notificar, lo dice en voz alta
+#    ronda --instalar 08:00 la programa diaria a esa hora (launchd)
+#    ronda --quitar         la desprograma
+# ─────────────────────────────────────────────────────────────
+set -uo pipefail
+
+EV_HOME="${EV_HOME:-$HOME/ev}"
+VAULT="${EV_VAULT:-$HOME/Documents/Obsidian Vault}"
+BITACORA="$EV_HOME/memory/rondas.md"
+PLIST="$HOME/Library/LaunchAgents/com.kino.ev.ronda.plist"
+ETIQUETA="com.kino.ev.ronda"
+
+VOZ=0
+[ "${1:-}" = "--voz" ] && { VOZ=1; shift; }
+
+notificar() {
+  # osascript escapa mal las comillas dobles; se quitan antes.
+  local cuerpo; cuerpo="$(tr -d '"' <<< "$1")"
+  osascript -e "display notification \"$cuerpo\" with title \"E.V.\" subtitle \"ronda del vault\"" 2>/dev/null
+}
+
+# ── instalar / quitar el horario ─────────────────────────────
+if [ "${1:-}" = "--instalar" ]; then
+  HORA="${2:-08:00}"
+  H="${HORA%%:*}"; M="${HORA##*:}"
+  H="${H#0}"; M="${M#0}"          # launchd quiere enteros, no "08"
+  mkdir -p "$(dirname "$PLIST")"
+  cat > "$PLIST" <<PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$ETIQUETA</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$EV_HOME/ronda</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>${H:-8}</integer>
+    <key>Minute</key><integer>${M:-0}</integer>
+  </dict>
+  <key>StandardOutPath</key><string>$EV_HOME/logs/ronda.log</string>
+  <key>StandardErrorPath</key><string>$EV_HOME/logs/ronda.log</string>
+  <key>RunAtLoad</key><false/>
+</dict>
+</plist>
+PLISTEOF
+  launchctl unload "$PLIST" 2>/dev/null
+  launchctl load "$PLIST" 2>/dev/null \
+    && echo "✓ ronda programada todos los días a las $HORA" \
+    || echo "✖ no se pudo programar (revisa $PLIST)"
+  exit 0
+fi
+
+if [ "${1:-}" = "--quitar" ]; then
+  launchctl unload "$PLIST" 2>/dev/null
+  rm -f "$PLIST" && echo "✓ ronda desprogramada"
+  exit 0
+fi
+
+# ── correr la ronda ──────────────────────────────────────────
+mkdir -p "$EV_HOME/logs" "$EV_HOME/memory"
+[ -f "$EV_HOME/RONDA.md" ] || { echo "falta RONDA.md"; exit 1; }
+
+# Sesión nueva y desechable cada vez: la ronda no debe arrastrar el hilo de
+# las conversaciones, ni ensuciarlo con su propio ruido.
+SALIDA="$(cd "$VAULT" && claude -p "$(cat "$EV_HOME/RONDA.md")" \
+    --session-id "$(uuidgen | tr 'A-Z' 'a-z')" \
+    --allowedTools "Read" "Glob" "Grep" \
+    2>>"$EV_HOME/logs/ronda.log")"
+
+if [ -z "$SALIDA" ]; then
+  echo "$(date '+%F %T') · ronda sin salida" >> "$EV_HOME/logs/ronda.log"
+  exit 1
+fi
+
+if grep -q "SIN NOVEDAD" <<< "$SALIDA"; then
+  echo "$(date '+%F %T') · sin novedad" >> "$EV_HOME/logs/ronda.log"
+  exit 0
+fi
+
+# Solo las viñetas, máximo tres: lo demás es preámbulo del modelo.
+PUNTOS="$(grep -E '^\s*-\s' <<< "$SALIDA" | head -3 | sed 's/^\s*-\s*//')"
+[ -z "$PUNTOS" ] && PUNTOS="$(head -3 <<< "$SALIDA")"
+
+notificar "$PUNTOS"
+
+{ printf '\n## %s\n\n' "$(date '+%F %H:%M')"
+  sed 's/^/- /' <<< "$PUNTOS"
+} >> "$BITACORA"
+
+if [ "$VOZ" -eq 1 ]; then
+  if [ -x "$EV_HOME/venv/bin/python3" ]; then
+    EV_TTS=say say -v "${EV_VOICE:-Paulina}" -r 190 "$PUNTOS" 2>/dev/null
+  else
+    say -v "${EV_VOICE:-Paulina}" -r 190 "$PUNTOS" 2>/dev/null
+  fi
+fi
+
+echo "$PUNTOS"
