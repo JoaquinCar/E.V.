@@ -29,3 +29,6 @@ __pycache__/
 # Reglas de veto propias de tu máquina
 vetado.local.txt
 .estado
+
+# Ícono personal (puede tener copyright — no se publica)
+app/apagada.png

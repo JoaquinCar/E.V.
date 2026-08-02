@@ -41,6 +41,17 @@ enum Estado: String {
 final class EV: NSObject, NSApplicationDelegate {
 
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+
+    // Ícono opcional para el estado apagado. Si no está en el bundle se usa el
+    // emoji, así que la app compila igual sin él (el mío tiene copyright y no
+    // viaja en el repo). No es "template": es a color y se ve igual en claro
+    // y oscuro; un template lo volvería una mancha.
+    private let iconoApagada: NSImage? = {
+        guard let u = Bundle.main.url(forResource: "apagada", withExtension: "png"),
+              let img = NSImage(contentsOf: u) else { return nil }
+        img.size = NSSize(width: 20, height: 20)   // 22pt es el techo de la barra
+        return img
+    }()
     private var proceso: Process?
     private var reloj: Timer?
 
@@ -127,7 +138,13 @@ final class EV: NSObject, NSApplicationDelegate {
     }
 
     private func pintar() {
-        item.button?.title = estado.icono
+        if estado == .apagada, let img = iconoApagada {
+            item.button?.image = img
+            item.button?.title = ""
+        } else {
+            item.button?.image = nil
+            item.button?.title = estado.icono
+        }
         itemEstado.title = estado.descripcion
         itemToggle.title = (estado == .apagada) ? "Despertar" : "Dormir"
 

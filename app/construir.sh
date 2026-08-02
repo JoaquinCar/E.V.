@@ -15,6 +15,12 @@ swiftc -O \
   "$AQUI/EVMenuBar.swift" \
   -framework AppKit -framework AVFoundation
 
+# Ícono opcional del estado apagado. Si no existe, la app usa el emoji.
+if [ -f "$AQUI/apagada.png" ]; then
+  cp "$AQUI/apagada.png" "$APP/Contents/Resources/apagada.png"
+  echo "  ícono personalizado incluido"
+fi
+
 echo "▸ armando el bundle…"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
