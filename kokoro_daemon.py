@@ -23,6 +23,11 @@ warnings.filterwarnings('ignore')
 
 FIFO_IN, FIFO_OUT = sys.argv[1], sys.argv[2]
 VOZ = os.environ.get('EV_KOKORO_VOICE', 'ef_dora')
+# 1.0 = ritmo natural del modelo. Arriba de ~1.4 empieza a atropellarse.
+try:
+    VELOCIDAD = float(os.environ.get('EV_KOKORO_SPEED', '1.15'))
+except ValueError:
+    VELOCIDAD = 1.15
 LANG = os.environ.get('EV_KOKORO_LANG', 'e')   # 'e' = español en Kokoro
 SR = 24000
 
@@ -40,7 +45,9 @@ def responder(linea: str) -> None:
 try:
     import soundfile as sf
     from kokoro import KPipeline
-    pipeline = KPipeline(lang_code=LANG)
+    # repo_id explícito: sin él, kokoro imprime un WARNING en cada arranque
+    # que se cuela a la terminal y ensucia la conversación.
+    pipeline = KPipeline(lang_code=LANG, repo_id='hexgrad/Kokoro-82M')
 except Exception as e:                                   # noqa: BLE001
     responder(f'ERROR carga: {type(e).__name__}: {e}')
     sys.exit(1)
@@ -72,7 +79,7 @@ for linea in fin:
         break
     try:
         trozos = []
-        for _, _, audio in pipeline(texto, voice=VOZ):
+        for _, _, audio in pipeline(texto, voice=VOZ, speed=VELOCIDAD):
             trozos.append(audio)
         if not trozos:
             responder('ERROR sin audio')

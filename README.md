@@ -173,6 +173,7 @@ Ajustes por variable de entorno:
 EV_PAUSA=2.5 ev             # más tiempo antes de cortarte (default 1.5 s)
 EV_MIN_AMP=0.04 ev          # sube si tu cuarto es ruidoso
 EV_KOKORO_VOICE=em_alex ev  # voz masculina
+EV_KOKORO_SPEED=1.3 ev      # más rápida (default 1.15; arriba de 1.4 se atropella)
 EV_TTS=say ev               # usa la voz del sistema
 ```
 

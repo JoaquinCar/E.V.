@@ -16,7 +16,7 @@ EV_HOME="${EV_HOME:-$HOME/ev}"
 VAULT="${EV_VAULT:-$HOME/Documents/Obsidian Vault}"
 MODEL="${EV_MODEL:-$EV_HOME/models/ggml-small.bin}"
 VOICE="${EV_VOICE:-Paulina}"
-RATE="${EV_RATE:-190}"
+RATE="${EV_RATE:-215}"        # a la par de Kokoro a 1.15
 SESSION_FILE="$EV_HOME/.session"
 MEM_DIR="$EV_HOME/memory"
 
