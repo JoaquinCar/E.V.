@@ -1,0 +1,27 @@
+# OJO: git NO soporta comentarios al final de línea. Un "venv/  # pesado"
+# se toma como patrón literal y no ignora nada. Los comentarios van arriba.
+
+# ─── privado: nunca subir ────────────────────────────────────
+# EV.md es la personalidad REAL, con los datos de quien la usa.
+# Lo que se publica es EV.example.md — cópialo y edítalo.
+EV.md
+
+# Transcripciones de conversaciones y memoria aprendida
+memory/*
+!memory/PERFIL.example.md
+
+# Logs: pueden traer fragmentos de lo que dijiste
+logs/
+
+# ─── pesado o regenerable ────────────────────────────────────
+# venv: ~1 GB, se recrea con requirements.txt
+venv/
+# models: el modelo de Whisper (~465 MB), se baja aparte
+models/
+__pycache__/
+*.pyc
+
+# ─── estado local ────────────────────────────────────────────
+.session
+.git.respaldo/
+.DS_Store
