@@ -28,3 +28,4 @@ __pycache__/
 
 # Reglas de veto propias de tu máquina
 vetado.local.txt
+.estado
