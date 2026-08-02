@@ -100,10 +100,47 @@ tienes, quién eres, cómo quieres que te hable. Sin eso es genérica.
 
 ```bash
 ev                    # conversación por voz, manos libres
+ev --escucha          # dormida hasta que digas su nombre
 ev "pregunta"         # escribes, contesta con voz
 ev -m "pregunta"      # mudo, solo texto
 ev --nuevo            # olvida el hilo del día
 ```
+
+### Modo despertador
+
+```bash
+$ ev --escucha
+😴 dormida — di «E.V.» o «Ivi» para despertarla
+
+   ·  y entonces le dije que no                 ← te oye, te ignora
+👂 despierta
+  tú → ¿qué tengo pendiente?
+```
+
+Responde a **E.V.** o a **Ivi**, y aguanta las variantes que Whisper suele
+producir. Puedes decir solo su nombre y esperar el "¿Sí?", o soltarlo todo de
+corrido: *"E.V., ¿qué tengo pendiente?"*.
+
+Tras tres silencios seguidos se vuelve a dormir sola.
+
+**Cuesta 0.1% de CPU y 4 MB de RAM mientras duerme.** Whisper solo corre cuando
+hay sonido de verdad; el resto del tiempo solo hay un `rec` esperando.
+
+### Rondas proactivas
+
+Que ella te busque a ti, no al revés:
+
+```bash
+ronda                    # una revisión ahora
+ronda --instalar 08:00   # diaria a esa hora (launchd)
+ronda --quitar
+```
+
+Revisa tus notas y te manda una notificación de macOS con **máximo tres cosas**
+que valgan la pena. Edita `RONDA.md` para decidir de qué te avisa.
+
+Si no hay nada real que decir responde `SIN NOVEDAD` y **no te notifica**. Una
+alerta que no aporta enseña a ignorar las siguientes.
 
 Ajustes por variable de entorno:
 
