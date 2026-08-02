@@ -32,4 +32,5 @@ vetado.local.txt
 
 # Ícono personal (puede tener copyright — no se publica)
 app/*.png
-.ultimo_saludo
+.ultimo_saludos
+.ultimo_despedidas

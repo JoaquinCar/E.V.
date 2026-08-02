@@ -1,0 +1,22 @@
+# Lo que dice cuando te despides. Una por línea, se elige al azar.
+# Las que empiezan con NOCHE> solo salen de 11 de la noche a 5 de la mañana.
+#
+# Mismo criterio que los saludos: cortas, sin ceremonia, sin "que tengas un
+# excelente día". Ella no es un call center.
+
+Va, aquí ando.
+Sale.
+Aquí te espero.
+Cuando quieras.
+Va pues.
+Ahí nos vemos.
+Aquí sigo si me necesitas.
+Órale.
+Listo.
+Va.
+
+NOCHE> Ya duérmete.
+NOCHE> Descansa.
+NOCHE> Ya duérmete, en serio.
+NOCHE> Buenas noches.
+NOCHE> Va. Y ya cierra la laptop.

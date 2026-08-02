@@ -127,20 +127,20 @@ despierta() {
   return 0
 }
 
-# ── qué dice al despertar ────────────────────────────────────
-# Al azar de saludos.txt. Una frase fija se siente robot a la tercera vez.
-# De 11pm a 5am entran también las marcadas NOCHE>, mezcladas con las
-# normales: que salgan a veces y no siempre es justo lo que las hace gracia.
+# ── qué dice al despertar y al despedirse ────────────────────
+# Al azar de saludos.txt / despedidas.txt. Una frase fija se siente robot a la
+# tercera vez. De 11pm a 5am entran también las marcadas NOCHE>, mezcladas con
+# las normales: que salgan a veces y no siempre es justo lo que las hace gracia.
 _azar() { od -An -N2 -tu2 </dev/urandom | tr -d " \n"; }
 
 # OJO con $RANDOM: saludo() se llama dentro de $(...), y un subshell hereda la
 # semilla del padre sin avanzarla — sale la MISMA frase siempre. De ahí
 # /dev/urandom. Por lo mismo el "último saludo" va a archivo y no a variable:
 # una asignación dentro del subshell tampoco sobrevive.
-ULTIMO_F="$EV_HOME/.ultimo_saludo"
-saludo() {
-  local f="$EV_HOME/saludos.txt"
-  [ -f "$f" ] || { printf '¿Sí?'; return; }
+frase_de() {
+  local f="$1" respaldo="$2"
+  [ -f "$f" ] || { printf '%s' "$respaldo"; return; }
+  local ultimo_f="$EV_HOME/.ultimo_$(basename "$f" .txt)"
 
   local hora nocturno=0
   hora=$(date +%H); hora=$((10#$hora))
@@ -157,10 +157,10 @@ saludo() {
   done < "$f"
 
   local n=${#lineas[@]}
-  [ "$n" -eq 0 ] && { printf '¿Sí?'; return; }
+  [ "$n" -eq 0 ] && { printf '%s' "$respaldo"; return; }
 
   local pick previo=""
-  [ -f "$ULTIMO_F" ] && previo="$(cat "$ULTIMO_F" 2>/dev/null)"
+  [ -f "$ultimo_f" ] && previo="$(cat "$ultimo_f" 2>/dev/null)"
 
   pick="${lineas[$(( $(_azar) % n ))]}"
   # Un reintento para no repetir la de hace un momento.
@@ -169,9 +169,12 @@ saludo() {
   fi
   # Red por si el azar o el archivo fallan: nunca devolver vacío.
   [ -z "$pick" ] && pick="${lineas[0]}"
-  printf '%s' "$pick" > "$ULTIMO_F" 2>/dev/null || true
+  printf '%s' "$pick" > "$ultimo_f" 2>/dev/null || true
   printf '%s' "$pick"
 }
+
+saludo()    { frase_de "$EV_HOME/saludos.txt"    '¿Sí?'; }
+despedida() { frase_de "$EV_HOME/despedidas.txt" 'Va, aquí ando.'; }
 
 # ── voz: Kokoro (neural, local) con caída a `say` ────────────
 # EV_TTS=kokoro | say | auto (default: kokoro si el venv existe)
@@ -488,8 +491,9 @@ conversar() {
     you "$texto"
     case " $(_normaliza "$texto") " in
       *" adios "*|*" hasta luego "*|*" ya vete "*|*" nos vemos "*|*" duermete "*)
-        ev "Va. Aquí ando."
-        decir "Va. Aquí ando."
+        _d="$(despedida)"
+        ev "$_d"
+        decir "$_d"
         return 0 ;;
     esac
 
