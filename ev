@@ -1,0 +1,367 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────
+#  E.V. — asistente de voz del vault de Kino
+#  escuchar (whisper.cpp) → pensar (claude) → hablar (say)
+#
+#  uso:
+#    ev                  modo voz, conversación continua
+#    ev "pregunta"       una pregunta escrita, respuesta hablada
+#    ev -m "pregunta"    igual pero sin voz (solo texto, mudo)
+#    ev --nuevo          arranca conversación desde cero
+# ─────────────────────────────────────────────────────────────
+set -uo pipefail
+
+EV_HOME="${EV_HOME:-$HOME/ev}"
+VAULT="${EV_VAULT:-$HOME/Documents/Obsidian Vault}"
+MODEL="${EV_MODEL:-$EV_HOME/models/ggml-small.bin}"
+VOICE="${EV_VOICE:-Paulina}"
+RATE="${EV_RATE:-190}"
+SESSION_FILE="$EV_HOME/.session"
+MEM_DIR="$EV_HOME/memory"
+
+# Cuánto tolera antes de cortar (ajustables por entorno)
+MAX_SEC="${EV_MAX_SEC:-30}"     # tope duro de grabación
+PAUSA="${EV_PAUSA:-1.5}"        # silencio que cierra tu turno
+UMBRAL="${EV_UMBRAL:-2%}"       # qué tan fuerte cuenta como voz (sox)
+MIN_AMP="${EV_MIN_AMP:-0.02}"   # piso de señal para molestarse en transcribir
+
+TMP="$(mktemp -d)"
+cleanup() {
+  [ -n "${KPID:-}" ] && kill "$KPID" 2>/dev/null
+  rm -rf "$TMP"; printf '\033[?25h'
+}
+# El trap de INT/TERM DEBE salir. Antes solo limpiaba y el script seguía
+# corriendo con $TMP ya borrado → "No such file or directory" en cascada.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+dim()  { printf '\033[2m%s\033[0m\n' "$*"; }
+you()  { printf '\033[1;36m  tú →\033[0m %s\n' "$*"; }
+ev()   { printf '\033[1;35m🔊 E.V.\033[0m %s\n' "$*"; }
+err()  { printf '\033[1;31m✖\033[0m %s\n' "$*" >&2; }
+
+# ── verificaciones ───────────────────────────────────────────
+for bin in whisper-cli rec say claude; do
+  command -v "$bin" >/dev/null || { err "falta '$bin' en el PATH"; exit 1; }
+done
+[ -f "$MODEL" ] || { err "no encuentro el modelo de Whisper en $MODEL"; exit 1; }
+[ -d "$VAULT" ] || { err "no encuentro el vault en $VAULT"; exit 1; }
+mkdir -p "$MEM_DIR"
+
+# ── sesión: se rota cada día ─────────────────────────────────
+# Una sesión eterna crece sin parar: cada turno reenvía toda la historia, se
+# vuelve lenta y acaba comprimiéndose sola de forma que no controlamos. Rotar
+# a diario arranca ligero. Lo que valga la pena recordar no vive en el hilo,
+# vive en memory/PERFIL.md (ver más abajo).
+if [ "${1:-}" = "--nuevo" ] || [ "${1:-}" = "-n" ]; then
+  rm -f "$SESSION_FILE"; shift
+fi
+HOY="$(date +%F)"
+SESSION="$(uuidgen | tr 'A-Z' 'a-z')"   # candidata por si hay que crear una
+REANUDAR=""                              # id a continuar, vacío = crear nueva
+if [ -s "$SESSION_FILE" ]; then
+  read -r _dia _uuid < "$SESSION_FILE" 2>/dev/null || true
+  if [ "${_dia:-}" = "$HOY" ] && [ -n "${_uuid:-}" ]; then
+    REANUDAR="$_uuid"
+  fi
+fi
+
+# ── logs que sobreviven a la sesión ──────────────────────────
+# Antes vivían en el directorio temporal y se destruían al salir: si algo
+# fallaba raro, no quedaba rastro que revisar.
+LOG_DIR="$EV_HOME/logs"
+mkdir -p "$LOG_DIR"
+ERR_CLAUDE="$LOG_DIR/claude-$HOY.log"
+ERR_KOKORO="$LOG_DIR/kokoro-$HOY.log"
+# Barrer lo de hace más de una semana para que no crezca sin fin.
+find "$LOG_DIR" -name '*.log' -mtime +7 -delete 2>/dev/null || true
+
+# Bitácoras: son ~7 KB por día (nada), pero se podan igual. El patrón 20*.md
+# solo toca las fechadas — PERFIL.md, que es la memoria de verdad, nunca se borra.
+RETENCION="${EV_RETENCION_DIAS:-180}"
+find "$MEM_DIR" -maxdepth 1 -name '20*.md' -mtime +"$RETENCION" -delete 2>/dev/null || true
+
+MUDO=0
+if [ "${1:-}" = "-m" ] || [ "${1:-}" = "--mudo" ]; then MUDO=1; shift; fi
+
+# ── voz: Kokoro (neural, local) con caída a `say` ────────────
+# EV_TTS=kokoro | say | auto (default: kokoro si el venv existe)
+TTS="${EV_TTS:-auto}"
+KREADY=0; KPID=""
+if [ "$TTS" = "auto" ]; then
+  if [ -x "$EV_HOME/venv/bin/python3" ] && [ -f "$EV_HOME/kokoro_daemon.py" ]
+  then TTS=kokoro; else TTS=say; fi
+fi
+
+# Cargar el modelo cuesta ~10 s, así que el demonio arranca lo antes posible
+# para solaparse con lo que tarda Claude en pensar la primera oración.
+kokoro_lanzar() {
+  [ "$TTS" = "kokoro" ] || return 0
+  [ "$MUDO" -eq 1 ] && { TTS=say; return 0; }
+  mkfifo "$TMP/k_in" "$TMP/k_out" 2>/dev/null || { TTS=say; return 0; }
+  "$EV_HOME/venv/bin/python3" "$EV_HOME/kokoro_daemon.py" \
+      "$TMP/k_in" "$TMP/k_out" 2>>"$ERR_KOKORO" &
+  KPID=$!
+  exec 3>"$TMP/k_in"    # el rendezvous de los FIFOs es en este orden
+  exec 4<"$TMP/k_out"
+}
+
+kokoro_listo() {
+  [ "$KREADY" = "1" ] && return 0
+  [ "$TTS" = "kokoro" ] || return 1
+  local l
+  IFS= read -r l <&4 || { TTS=say; return 1; }
+  if [ "$l" = "READY" ]; then KREADY=1; return 0; fi
+  err "Kokoro no cargó ($l) — sigo con la voz del sistema"
+  TTS=say; return 1
+}
+
+# ── esperar a que termine el audio, espiando el teclado ──────
+# Sin TTY no hay tecla que espiar; el barge-in se desactiva solo.
+BARGE=0; { [ -t 0 ] && [ -r /dev/tty ]; } && BARGE=1
+
+_esperar_o_tecla() {
+  local pp="$1"
+  if [ "$BARGE" -eq 0 ]; then wait "$pp" 2>/dev/null; return 0; fi
+  while kill -0 "$pp" 2>/dev/null; do
+    # </dev/tty explícito: dentro del bucle del stream, fd 0 es la salida de
+    # Claude, no el teclado. Sin esto el barge-in se comía oraciones.
+    if read -rsn1 -t 0.12 </dev/tty 2>/dev/null; then
+      kill "$pp" 2>/dev/null; wait "$pp" 2>/dev/null
+      return 1
+    fi
+  done
+  wait "$pp" 2>/dev/null; return 0
+}
+
+# Devuelve 1 si Kino la cortó con una tecla.
+decir() {
+  [ "$MUDO" -eq 1 ] && return 0
+  [ -z "${1// /}" ] && return 0
+
+  if [ "$TTS" = "kokoro" ] && kokoro_listo; then
+    local wav=""
+    printf '%s\n' "$1" >&3
+    IFS= read -r wav <&4 || TTS=say
+    case "${wav:-}" in
+      /*) if [ -f "$wav" ]; then
+            afplay "$wav" 2>/dev/null &
+            _esperar_o_tecla $!; local r=$?
+            rm -f "$wav"        # ya sonó; si no, se acumulan sesión tras sesión
+            return $r
+          fi ;;
+      ERROR*) err "$wav"; TTS=say ;;
+    esac
+  fi
+
+  say -v "$VOICE" -r "$RATE" "$1" 2>/dev/null &
+  _esperar_o_tecla $!
+}
+
+# ── pensar: claude en streaming, oración por oración ─────────
+# stream-json + frases.py hacen que la primera oración salga a los ~2 s en vez
+# de esperar los ~15 s de la respuesta completa.
+# Poder completo: agentes, shell, web, skills.
+HERRAMIENTAS=(Read Glob Grep Write Edit Task Bash WebSearch WebFetch Skill TodoWrite)
+
+# Lista negra editable en vetado.txt (una regla por línea, # son comentarios).
+VETADO=()
+if [ -f "$EV_HOME/vetado.txt" ]; then
+  while IFS= read -r _r; do
+    case "$_r" in ''|'#'*) continue ;; esac
+    VETADO+=("$_r")
+  done < "$EV_HOME/vetado.txt"
+fi
+
+# La memoria larga va inyectada en el prompt, no leída con una herramienta:
+# así la tiene desde el primer token, sin gastar un turno de tool-call.
+memoria_larga() {
+  local f="$MEM_DIR/PERFIL.md"
+  [ -f "$f" ] || return 0
+  printf '\n\n---\n\n# Tu memoria de sesiones anteriores\n\n'
+  printf 'El hilo de chat se reinicia cada día; esto no. Es lo único que cruza\n'
+  printf 'de un día a otro, y lo mantienes tú (memory/PERFIL.md).\n\n'
+  cat "$f"
+}
+
+_claude() {
+  local pregunta="$1"; shift
+  (cd "$VAULT" && claude -p "$pregunta" "$@" \
+      --output-format stream-json --include-partial-messages --verbose \
+      --append-system-prompt "$(cat "$EV_HOME/EV.md")$(memoria_larga)" \
+      --allowedTools "${HERRAMIENTAS[@]}" \
+      ${VETADO:+--disallowedTools "${VETADO[@]}"} \
+      2>>"$ERR_CLAUDE" | python3 "$EV_HOME/frases.py")
+}
+
+# ── respaldo: un commit por turno que toque el vault ─────────
+# Esta es la red de verdad. Cada orden de voz que cambie algo queda como un
+# commit propio firmado por E.V., así que revertir es una sola línea.
+respaldar() {
+  ( cd "$VAULT" 2>/dev/null || exit 0
+    git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
+    if git diff --quiet 2>/dev/null \
+       && git diff --cached --quiet 2>/dev/null \
+       && [ -z "$(git ls-files --others --exclude-standard 2>/dev/null)" ]; then
+      exit 0
+    fi
+    git add -A >/dev/null 2>&1
+    git -c user.name="E.V." -c user.email="ev@local" \
+        commit -qm "E.V.: ${1:0:72}" >/dev/null 2>&1
+  ) || true
+}
+
+pensar_stream() {
+  local pregunta="$1"
+  if [ -n "$REANUDAR" ]; then
+    _claude "$pregunta" --resume "$REANUDAR"
+  else
+    _claude "$pregunta" --session-id "$SESSION"
+  fi
+}
+
+# ── escuchar: grabar hasta ENTER, transcribir con whisper ────
+# OJO: escuchar() devuelve la transcripción por stdout, así que TODO lo que
+# pinte en pantalla tiene que ir a stderr (>&2). Si no, el texto de la interfaz
+# se mezcla con lo que dijiste y acaba enviándose al modelo como si fuera tuyo.
+escuchar() {
+  local wav="$TMP/in.wav"
+  rm -f "$wav"
+  printf '\033[1;32m🎙  habla…\033[0m \033[2m(se corta solo cuando te calles)\033[0m\n' >&2
+
+  # Nada de correr rec en segundo plano peleando con `read` por la terminal:
+  # con un TTY real sox pinta su medidor directo en /dev/tty, se salta las
+  # redirecciones y se come el ENTER. Aquí corre en primer plano y se detiene
+  # solo por silencio.
+  #
+  # Orden de efectos crítico: `trim` va ANTES que `silence`. Al revés, si nunca
+  # hablas el chain se cuelga esperando el primer sonido para siempre.
+  #   trim 0 MAX        → tope duro de entrada
+  #   silence 1 0.1 U   → arranca al detectar voz (recorta el silencio inicial)
+  #           1 PAUSA U → cierra tras PAUSA segundos de silencio
+  rec -q -r 16000 -c 1 -b 16 "$wav" </dev/null >/dev/null 2>/dev/null \
+      trim 0 "$MAX_SEC" \
+      silence 1 0.1 "$UMBRAL" 1 "$PAUSA" "$UMBRAL"
+  printf '\033[1A\033[2K' >&2
+
+  [ -s "$wav" ] || return 0
+  local dur; dur=$(soxi -D "$wav" 2>/dev/null || echo 0)
+  awk -v d="$dur" 'BEGIN{exit !(d < 0.4)}' && return 0
+
+  # Whisper alucina frases hechas ("¿Estás ahí?", "Gracias por ver el video")
+  # cuando le das ruido de fondo. Si no hubo señal real, ni lo intentamos.
+  local amp
+  amp=$(sox "$wav" -n stat 2>&1 | awk '/Maximum amplitude/{print $3}')
+  awk -v a="${amp:-0}" -v m="$MIN_AMP" 'BEGIN{exit !(a < m)}' && return 0
+
+  whisper-cli -m "$MODEL" -f "$wav" -l es -nt -np 2>/dev/null \
+    | tr '\n' ' ' \
+    | sed 's/\[[^]]*\]//g; s/([^)]*)//g; s/  */ /g; s/^ *//; s/ *$//'
+}
+
+# ── bitácora ─────────────────────────────────────────────────
+anotar() {
+  local f="$MEM_DIR/$(date +%Y-%m-%d).md"
+  [ -f "$f" ] || printf '# Conversaciones con E.V. — %s\n\n' "$(date +%Y-%m-%d)" > "$f"
+  printf '**%s · tú:** %s\n\n**E.V.:** %s\n\n---\n\n' "$(date +%H:%M)" "$1" "$2" >> "$f"
+}
+
+# ── turno completo ───────────────────────────────────────────
+_intento() {
+  local pregunta="$1" frase respuesta="" primera=1 cortada=0
+  printf '\033[2m   pensando…\033[0m\r'
+
+  # Process substitution, NO pipe: con un pipe el bucle corre en subshell
+  # y `respuesta` se perdería al terminar.
+  while IFS= read -r frase; do
+    [ -z "$frase" ] && continue
+    # \x01 = aviso de estado (leyendo, escribiendo…). Se pinta, no se habla.
+    if [ "${frase:0:1}" = $'\x01' ]; then
+      printf '\033[2K\033[2m   %s…\033[0m\r' "${frase:1}"
+      continue
+    fi
+    if [ "$primera" -eq 1 ]; then
+      printf '\033[2K\033[1;35m🔊 E.V.\033[0m '; primera=0
+    fi
+    printf '%s ' "$frase"
+    respuesta+="$frase "
+    if [ "$cortada" -eq 0 ]; then
+      decir "$frase" || { cortada=1; printf '\033[2m⏹\033[0m'; break; }
+    fi
+  done < <(pensar_stream "$pregunta")
+
+  [ "$primera" -eq 1 ] && return 1     # ni una oración: falló
+  echo
+  if [ -z "$REANUDAR" ]; then
+    printf '%s %s\n' "$HOY" "$SESSION" > "$SESSION_FILE"
+    REANUDAR="$SESSION"          # los turnos siguientes ya continúan este hilo
+  fi
+  anotar "$pregunta" "$respuesta"
+  respaldar "$pregunta"
+  return 0
+}
+
+turno() {
+  _intento "$1" && return 0
+  # ¿la sesión guardada ya no existe? bórrala y reintenta con una nueva
+  if [ -n "$REANUDAR" ]; then
+    rm -f "$SESSION_FILE"; REANUDAR=""
+    _intento "$1" && return 0
+  fi
+  printf '\033[2K'
+  err "claude no devolvió nada (últimas líneas de $ERR_CLAUDE):"
+  tail -5 "$ERR_CLAUDE" 2>/dev/null | sed 's/^/    /' >&2
+  return 1
+}
+
+# Lo antes posible: la carga del modelo se solapa con lo que Claude tarda.
+kokoro_lanzar
+
+# ── modo una-sola-pregunta ───────────────────────────────────
+if [ $# -gt 0 ]; then
+  you "$*"
+  turno "$*"
+  exit $?
+fi
+
+# ── modo conversación por voz ────────────────────────────────
+# Cargar el modelo en frío cuesta ~9s; en caliente 0.4s. Lo precalentamos
+# en segundo plano para que la primera frase ya lo encuentre en memoria.
+precalentar() {
+  sox -n -r 16000 -c 1 -b 16 "$TMP/warm.wav" trim 0.0 0.3 2>/dev/null \
+    && whisper-cli -m "$MODEL" -f "$TMP/warm.wav" -l es -nt -np >/dev/null 2>&1
+}
+precalentar &
+
+if [ -n "$REANUDAR" ]; then _sid="$REANUDAR (hoy)"; else _sid="nueva"; fi
+if [ "$TTS" = "kokoro" ]; then
+  _voz="Kokoro ${EV_KOKORO_VOICE:-ef_dora} (neural, local)"
+else
+  _voz="$VOICE (sistema)"
+fi
+dim "E.V. lista · voz: $_voz · sesión ${_sid:0:8}"
+dim "manos libres: habla y se corta sola"
+dim "cualquier tecla la interrumpe mientras habla · 'adiós' o Ctrl-C para salir"
+echo
+
+while true; do
+  texto="$(escuchar)"
+
+  if [ -z "$texto" ]; then
+    dim "   (no escuché nada)"
+    continue
+  fi
+
+  you "$texto"
+
+  case "$(tr 'A-Z' 'a-z' <<< "$texto")" in
+    *adiós*|*adios*|*hasta\ luego*|*ya\ vete*|*salir*)
+      ev "Va. Aquí ando."
+      hablar "Va. Aquí ando."
+      exit 0 ;;
+  esac
+
+  turno "$texto"
+  echo
+done

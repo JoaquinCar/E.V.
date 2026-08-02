@@ -1,0 +1,41 @@
+# Patrones que E.V. NO puede ejecutar, uno por línea.
+# Se pasan tal cual a --disallowedTools de Claude Code.
+# Las líneas que empiezan con # y las vacías se ignoran.
+#
+# OJO: el patrón es por prefijo, así que esto es defensa en profundidad,
+# no un muro. El respaldo automático a git es la red que sí atrapa todo.
+
+# --- borrado de archivos ---
+Bash(rm *)
+Bash(rmdir *)
+Bash(shred *)
+Bash(dd *)
+Bash(mkfs*)
+
+# --- privilegios y sistema ---
+Bash(sudo *)
+Bash(su *)
+Bash(chmod *)
+Bash(chown *)
+Bash(shutdown*)
+Bash(reboot*)
+Bash(diskutil *)
+Bash(launchctl *)
+Bash(killall *)
+Bash(pkill *)
+
+# --- git que no se deshace, o que sale de la maquina ---
+Bash(git push*)
+Bash(git reset --hard*)
+Bash(git clean*)
+
+# --- descargar y ejecutar a ciegas ---
+Bash(curl * | *)
+Bash(wget * | *)
+
+# --- zonas prohibidas del vault ---
+Read(kino-personal/**)
+Write(kino-personal/**)
+Edit(kino-personal/**)
+Write(.raw/**)
+Edit(.raw/**)
