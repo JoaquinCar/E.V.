@@ -165,14 +165,16 @@ decir() {
 # Poder completo: agentes, shell, web, skills.
 HERRAMIENTAS=(Read Glob Grep Write Edit Task Bash WebSearch WebFetch Skill TodoWrite)
 
-# Lista negra editable en vetado.txt (una regla por línea, # son comentarios).
+# Lista negra: vetado.txt son las reglas generales (públicas) y
+# vetado.local.txt las tuyas (rutas de tu máquina, no se sube a ningún lado).
 VETADO=()
-if [ -f "$EV_HOME/vetado.txt" ]; then
+for _f in "$EV_HOME/vetado.txt" "$EV_HOME/vetado.local.txt"; do
+  [ -f "$_f" ] || continue
   while IFS= read -r _r; do
     case "$_r" in ''|'#'*) continue ;; esac
     VETADO+=("$_r")
-  done < "$EV_HOME/vetado.txt"
-fi
+  done < "$_f"
+done
 
 # La memoria larga va inyectada en el prompt, no leída con una herramienta:
 # así la tiene desde el primer token, sin gastar un turno de tool-call.

@@ -25,3 +25,6 @@ __pycache__/
 .session
 .git.respaldo/
 .DS_Store
+
+# Reglas de veto propias de tu máquina
+vetado.local.txt

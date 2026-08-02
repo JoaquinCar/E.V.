@@ -33,9 +33,10 @@ Bash(git clean*)
 Bash(curl * | *)
 Bash(wget * | *)
 
-# --- zonas prohibidas del vault ---
-Read(kino-personal/**)
-Write(kino-personal/**)
-Edit(kino-personal/**)
+# --- zonas prohibidas (ejemplo: cambia "privado" por tu carpeta) ---
+# Las tuyas van en vetado.local.txt, que no se sube.
+Read(privado/**)
+Write(privado/**)
+Edit(privado/**)
 Write(.raw/**)
 Edit(.raw/**)
