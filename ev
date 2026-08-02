@@ -5,6 +5,7 @@
 #
 #  uso:
 #    ev                  modo voz, conversación continua
+#    ev --escucha        dormida hasta que digas «E.V.» o «Ivi»
 #    ev "pregunta"       una pregunta escrita, respuesta hablada
 #    ev -m "pregunta"    igual pero sin voz (solo texto, mudo)
 #    ev --nuevo          arranca conversación desde cero
@@ -84,6 +85,39 @@ find "$MEM_DIR" -maxdepth 1 -name '20*.md' -mtime +"$RETENCION" -delete 2>/dev/n
 
 MUDO=0
 if [ "${1:-}" = "-m" ] || [ "${1:-}" = "--mudo" ]; then MUDO=1; shift; fi
+
+# ── modo despertador ─────────────────────────────────────────
+DESPERTADOR=0
+if [ "${1:-}" = "-e" ] || [ "${1:-}" = "--escucha" ]; then DESPERTADOR=1; shift; fi
+DORMIR_TRAS="${EV_DORMIR_TRAS:-3}"      # silencios seguidos antes de dormirse
+ESCUCHA_MAX="${EV_ESCUCHA_MAX:-4}"        # ventana fija de escucha pasiva
+ESCUCHA_MIN_AMP="${EV_ESCUCHA_MIN_AMP:-0.05}"  # piso para molestarse en transcribir
+
+
+# Cómo se le puede llamar. Whisper transcribe "E.V." de muchas formas según
+# cómo lo digas, así que la lista es generosa a propósito.
+PALABRAS="${EV_PALABRA:-eve|evee|eves|ebe|ivi|ivy|eva|hebe|e v|ev}"
+
+# Whisper transcribía "Eve" como "Y": es corta y fonéticamente débil en
+# español. Un prompt inicial lo sesga y lo acierta. Cuesta cero.
+PROMPT_WHISPER="${EV_PROMPT_WHISPER:-Conversación con la asistente Eve. Se le dice Eve o E.V.}"
+
+# Quita acentos, mayúsculas y puntuación: compara manzanas con manzanas.
+_normaliza() {
+  tr '[:upper:]' '[:lower:]' <<< "$1" \
+    | sed 'y/áéíóúüñ/aeiouun/' \
+    | sed 's/[^a-z0-9ñ ]/ /g; s/  */ /g; s/^ //; s/ $//'
+}
+
+# ¿La frase empieza con su nombre? Si sí, deja en RESTO lo que venga después,
+# para que "E.V., ¿qué tengo pendiente?" no gaste un turno en el saludo.
+RESTO=""
+despierta() {
+  local norm; norm="$(_normaliza "$1")"
+  grep -qE "^(oye |hey |ok |okay )?($PALABRAS)( |$)" <<< "$norm" || return 1
+  RESTO="$(sed -E "s/^(oye |hey |ok |okay )?($PALABRAS)( |$)//" <<< "$norm")"
+  return 0
+}
 
 # ── voz: Kokoro (neural, local) con caída a `say` ────────────
 # EV_TTS=kokoro | say | auto (default: kokoro si el venv existe)
@@ -227,10 +261,14 @@ pensar_stream() {
 # OJO: escuchar() devuelve la transcripción por stdout, así que TODO lo que
 # pinte en pantalla tiene que ir a stderr (>&2). Si no, el texto de la interfaz
 # se mezcla con lo que dijiste y acaba enviándose al modelo como si fuera tuyo.
+# $1 = segundos máximos (opt) · $2 = pausa que cierra (opt)
+# $3 = "silencioso" para no pintar el prompt (escucha pasiva del despertador)
 escuchar() {
   local wav="$TMP/in.wav"
+  local mx="${1:-$MAX_SEC}" pa="${2:-$PAUSA}" callado="${3:-}"
   rm -f "$wav"
-  printf '\033[1;32m🎙  habla…\033[0m \033[2m(se corta solo cuando te calles)\033[0m\n' >&2
+  [ -z "$callado" ] && \
+    printf '\033[1;32m🎙  habla…\033[0m \033[2m(se corta solo cuando te calles)\033[0m\n' >&2
 
   # Nada de correr rec en segundo plano peleando con `read` por la terminal:
   # con un TTY real sox pinta su medidor directo en /dev/tty, se salta las
@@ -243,9 +281,9 @@ escuchar() {
   #   silence 1 0.1 U   → arranca al detectar voz (recorta el silencio inicial)
   #           1 PAUSA U → cierra tras PAUSA segundos de silencio
   rec -q -r 16000 -c 1 -b 16 "$wav" </dev/null >/dev/null 2>/dev/null \
-      trim 0 "$MAX_SEC" \
-      silence 1 0.1 "$UMBRAL" 1 "$PAUSA" "$UMBRAL"
-  printf '\033[1A\033[2K' >&2
+      trim 0 "$mx" \
+      silence 1 0.1 "$UMBRAL" 1 "$pa" "$UMBRAL"
+  [ -z "$callado" ] && printf '\033[1A\033[2K' >&2
 
   [ -s "$wav" ] || return 0
   local dur; dur=$(soxi -D "$wav" 2>/dev/null || echo 0)
@@ -257,7 +295,28 @@ escuchar() {
   amp=$(sox "$wav" -n stat 2>&1 | awk '/Maximum amplitude/{print $3}')
   awk -v a="${amp:-0}" -v m="$MIN_AMP" 'BEGIN{exit !(a < m)}' && return 0
 
-  whisper-cli -m "$MODEL" -f "$wav" -l es -nt -np 2>/dev/null \
+  whisper-cli -m "$MODEL" -f "$wav" -l es -nt -np --prompt "$PROMPT_WHISPER" 2>/dev/null \
+    | tr '\n' ' ' \
+    | sed 's/\[[^]]*\]//g; s/([^)]*)//g; s/  */ /g; s/^ *//; s/ *$//'
+}
+
+# ── escucha pasiva del despertador ───────────────────────────
+# Ventana fija a propósito: el efecto `silence` recorta todo lo anterior al
+# disparo y se comía justo la palabra que estamos esperando. Probado con
+# disparos de 0.1 s, 0.05 s y 0.03 s — en los tres casos "Eve" desaparecía.
+# Como no transcribe si no hubo señal, el costo en reposo es el de `rec`: 0.1%.
+escuchar_pasivo() {
+  local wav="$TMP/pasivo.wav"
+  rm -f "$wav"
+  rec -q -r 16000 -c 1 -b 16 "$wav" </dev/null >/dev/null 2>/dev/null \
+      trim 0 "$ESCUCHA_MAX"
+  [ -s "$wav" ] || return 0
+
+  local amp
+  amp=$(sox "$wav" -n stat 2>&1 | awk '/Maximum amplitude/{print $3}')
+  awk -v a="${amp:-0}" -v m="$ESCUCHA_MIN_AMP" 'BEGIN{exit !(a < m)}' && return 0
+
+  whisper-cli -m "$MODEL" -f "$wav" -l es -nt -np --prompt "$PROMPT_WHISPER" 2>/dev/null \
     | tr '\n' ' ' \
     | sed 's/\[[^]]*\]//g; s/([^)]*)//g; s/  */ /g; s/^ *//; s/ *$//'
 }
@@ -343,27 +402,75 @@ else
   _voz="$VOICE (sistema)"
 fi
 dim "E.V. lista · voz: $_voz · sesión ${_sid:0:8}"
-dim "manos libres: habla y se corta sola"
+if [ "$DESPERTADOR" -eq 1 ]; then
+  dim "😴 dormida — di «${EV_PALABRA_MOSTRAR:-E.V.}» o «Ivi» para despertarla"
+else
+  dim "manos libres: habla y se corta sola"
+fi
 dim "cualquier tecla la interrumpe mientras habla · 'adiós' o Ctrl-C para salir"
 echo
 
-while true; do
-  texto="$(escuchar)"
+# ── conversar hasta que diga adiós o se quede callado ────────
+# Devuelve 0 si se despidió, 1 si se quedó callado (para volver a dormir).
+conversar() {
+  local texto vacios=0
+  while true; do
+    texto="$(escuchar)"
 
-  if [ -z "$texto" ]; then
-    dim "   (no escuché nada)"
+    if [ -z "$texto" ]; then
+      vacios=$((vacios + 1))
+      if [ "$DESPERTADOR" -eq 1 ] && [ "$vacios" -ge "$DORMIR_TRAS" ]; then
+        return 1
+      fi
+      dim "   (no escuché nada)"
+      continue
+    fi
+    vacios=0
+
+    you "$texto"
+    case " $(_normaliza "$texto") " in
+      *" adios "*|*" hasta luego "*|*" ya vete "*|*" nos vemos "*|*" duermete "*)
+        ev "Va. Aquí ando."
+        decir "Va. Aquí ando."
+        return 0 ;;
+    esac
+
+    turno "$texto"
+    echo
+  done
+}
+
+# ── modo normal: conversación directa ────────────────────────
+if [ "$DESPERTADOR" -eq 0 ]; then
+  conversar
+  exit 0
+fi
+
+# ── modo despertador: dormida hasta oír su nombre ────────────
+while true; do
+  # Escucha pasiva: clips cortos y sin prompt en pantalla, para no llenar
+  # la terminal de ruido mientras duerme.
+  texto="$(escuchar_pasivo)"
+  [ -z "$texto" ] && continue
+
+  if ! despierta "$texto"; then
+    # Se oyó algo que no era su nombre. Se muestra tenue para que sepas que
+    # está viva, pero no se le manda nada al modelo.
+    dim "   ·  $(printf '%.60s' "$texto")"
     continue
   fi
 
-  you "$texto"
+  printf '\033[1;33m👂 despierta\033[0m\n'
+  if [ -n "${RESTO//[[:space:]]/}" ]; then
+    # Dijiste "E.V., ¿qué tengo pendiente?" — la pregunta ya venía incluida.
+    you "$RESTO"
+    turno "$RESTO"
+    echo
+  else
+    decir "¿Sí?"
+  fi
 
-  case "$(tr 'A-Z' 'a-z' <<< "$texto")" in
-    *adiós*|*adios*|*hasta\ luego*|*ya\ vete*|*salir*)
-      ev "Va. Aquí ando."
-      hablar "Va. Aquí ando."
-      exit 0 ;;
-  esac
-
-  turno "$texto"
+  conversar || dim "   (silencio — vuelvo a dormir)"
   echo
+  dim "😴 dormida — di «${EV_PALABRA_MOSTRAR:-E.V.}» o «Ivi»"
 done
