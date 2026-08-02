@@ -15,11 +15,14 @@ swiftc -O \
   "$AQUI/EVMenuBar.swift" \
   -framework AppKit -framework AVFoundation
 
-# Ícono opcional del estado apagado. Si no existe, la app usa el emoji.
-if [ -f "$AQUI/apagada.png" ]; then
-  cp "$AQUI/apagada.png" "$APP/Contents/Resources/apagada.png"
-  echo "  ícono personalizado incluido"
-fi
+# Íconos opcionales, uno por estado: apagada.png, dormida.png, escuchando.png,
+# pensando.png, hablando.png. El estado que no tenga imagen usa su emoji.
+for e in apagada dormida escuchando pensando hablando; do
+  if [ -f "$AQUI/$e.png" ]; then
+    cp "$AQUI/$e.png" "$APP/Contents/Resources/$e.png"
+    echo "  ícono: $e"
+  fi
+done
 
 echo "▸ armando el bundle…"
 cat > "$APP/Contents/Info.plist" <<PLIST

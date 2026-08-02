@@ -127,6 +127,52 @@ despierta() {
   return 0
 }
 
+# ── qué dice al despertar ────────────────────────────────────
+# Al azar de saludos.txt. Una frase fija se siente robot a la tercera vez.
+# De 11pm a 5am entran también las marcadas NOCHE>, mezcladas con las
+# normales: que salgan a veces y no siempre es justo lo que las hace gracia.
+_azar() { od -An -N2 -tu2 </dev/urandom | tr -d " \n"; }
+
+# OJO con $RANDOM: saludo() se llama dentro de $(...), y un subshell hereda la
+# semilla del padre sin avanzarla — sale la MISMA frase siempre. De ahí
+# /dev/urandom. Por lo mismo el "último saludo" va a archivo y no a variable:
+# una asignación dentro del subshell tampoco sobrevive.
+ULTIMO_F="$EV_HOME/.ultimo_saludo"
+saludo() {
+  local f="$EV_HOME/saludos.txt"
+  [ -f "$f" ] || { printf '¿Sí?'; return; }
+
+  local hora nocturno=0
+  hora=$(date +%H); hora=$((10#$hora))
+  { [ "$hora" -ge 23 ] || [ "$hora" -lt 5 ]; } && nocturno=1
+
+  local lineas=() l
+  while IFS= read -r l; do
+    case "$l" in ''|'#'*) continue ;; esac
+    if [ "${l#NOCHE>}" != "$l" ]; then
+      [ "$nocturno" -eq 1 ] || continue
+      l="${l#NOCHE>}"; l="${l# }"
+    fi
+    lineas+=("$l")
+  done < "$f"
+
+  local n=${#lineas[@]}
+  [ "$n" -eq 0 ] && { printf '¿Sí?'; return; }
+
+  local pick previo=""
+  [ -f "$ULTIMO_F" ] && previo="$(cat "$ULTIMO_F" 2>/dev/null)"
+
+  pick="${lineas[$(( $(_azar) % n ))]}"
+  # Un reintento para no repetir la de hace un momento.
+  if [ "$n" -gt 1 ] && [ "$pick" = "$previo" ]; then
+    pick="${lineas[$(( $(_azar) % n ))]}"
+  fi
+  # Red por si el azar o el archivo fallan: nunca devolver vacío.
+  [ -z "$pick" ] && pick="${lineas[0]}"
+  printf '%s' "$pick" > "$ULTIMO_F" 2>/dev/null || true
+  printf '%s' "$pick"
+}
+
 # ── voz: Kokoro (neural, local) con caída a `say` ────────────
 # EV_TTS=kokoro | say | auto (default: kokoro si el venv existe)
 TTS="${EV_TTS:-auto}"
@@ -479,7 +525,9 @@ while true; do
     turno "$RESTO"
     echo
   else
-    decir "¿Sí?"
+    _s="$(saludo)"
+    ev "$_s"
+    decir "$_s"
   fi
 
   conversar || dim "   (silencio — vuelvo a dormir)"

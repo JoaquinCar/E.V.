@@ -31,4 +31,4 @@ vetado.local.txt
 .estado
 
 # Ícono personal (puede tener copyright — no se publica)
-app/apagada.png
+app/*.png

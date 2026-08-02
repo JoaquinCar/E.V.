@@ -42,15 +42,22 @@ final class EV: NSObject, NSApplicationDelegate {
 
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
-    // Ícono opcional para el estado apagado. Si no está en el bundle se usa el
-    // emoji, así que la app compila igual sin él (el mío tiene copyright y no
-    // viaja en el repo). No es "template": es a color y se ve igual en claro
-    // y oscuro; un template lo volvería una mancha.
-    private let iconoApagada: NSImage? = {
-        guard let u = Bundle.main.url(forResource: "apagada", withExtension: "png"),
-              let img = NSImage(contentsOf: u) else { return nil }
-        img.size = NSSize(width: 20, height: 20)   // 22pt es el techo de la barra
-        return img
+    // Cualquier estado puede tener su PNG en Resources con el nombre del
+    // estado (apagada.png, pensando.png…). El que no lo tenga usa su emoji,
+    // así que la app compila igual sin ninguno — los míos tienen copyright y
+    // no viajan en el repo.
+    //
+    // No son "template images" a propósito: son a color, y un template los
+    // volvería una mancha negra sin detalle.
+    private lazy var iconos: [Estado: NSImage] = {
+        var mapa = [Estado: NSImage]()
+        for e in [Estado.apagada, .dormida, .escuchando, .pensando, .hablando] {
+            guard let u = Bundle.main.url(forResource: e.rawValue, withExtension: "png"),
+                  let img = NSImage(contentsOf: u) else { continue }
+            img.size = NSSize(width: 20, height: 20)   // 22pt es el techo de la barra
+            mapa[e] = img
+        }
+        return mapa
     }()
     private var proceso: Process?
     private var reloj: Timer?
@@ -138,7 +145,7 @@ final class EV: NSObject, NSApplicationDelegate {
     }
 
     private func pintar() {
-        if estado == .apagada, let img = iconoApagada {
+        if let img = iconos[estado] {
             item.button?.image = img
             item.button?.title = ""
         } else {

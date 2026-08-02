@@ -1,0 +1,27 @@
+# Lo que dice al despertar, cuando la llamas sin pedirle nada todavía.
+# Una por línea. Se elige al azar. Edítalas a tu gusto.
+#
+# Las líneas que empiezan con # y las vacías se ignoran.
+# Las que empiezan con NOCHE> solo salen de 11 de la noche a 5 de la mañana.
+#
+# Nota: E.V. no la construyó Stark, la construyó Peter. Así que no habla como
+# mayordomo. Habla como alguien que ya te conoce. Cortas, sin ceremonia.
+
+Aquí estoy.
+Te escucho.
+Dime.
+¿Qué pasó?
+Aquí ando.
+En línea.
+¿Qué necesitas?
+Lista.
+Dime, Kino.
+Ajá.
+¿Qué traes?
+Ya desperté.
+
+NOCHE> Aquí sigo.
+NOCHE> ¿Todavía despierto?
+NOCHE> Dime, aunque sea tardísimo.
+NOCHE> A esta hora, tú dirás.
+NOCHE> Aquí ando, insomne igual que tú.
