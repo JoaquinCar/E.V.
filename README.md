@@ -126,6 +126,31 @@ Tras tres silencios seguidos se vuelve a dormir sola.
 **Cuesta 0.1% de CPU y 4 MB de RAM mientras duerme.** Whisper solo corre cuando
 hay sonido de verdad; el resto del tiempo solo hay un `rec` esperando.
 
+### App de barra de menú
+
+Si no te late tener una terminal abierta solo para que te escuche:
+
+```bash
+./app/construir.sh ~/Applications/E.V..app
+open ~/Applications/E.V..app
+```
+
+Queda un ícono junto al reloj que cambia según lo que esté haciendo:
+**🌙** apagada · **😴** dormida · **🎙** escuchando · **💭** pensando · **🔊** hablando.
+
+Clic para despertarla o dormirla. El menú también abre la bitácora del día, su
+memoria y su personalidad, y dispara una ronda.
+
+Son ~250 líneas de Swift con AppKit y **no necesita Xcode** — se compila con
+`swiftc` y se arma el bundle a mano. La app **no reimplementa nada**: lanza el
+mismo script `ev` y lee su estado de un archivo, así que si prefieres la
+terminal todo sigue funcionando igual.
+
+Un detalle que resuelve más de lo que parece: un `.app` con su propio bundle id
+recibe el permiso de micrófono **limpio y una sola vez**. Un servicio de
+`launchd` suelto se pelea con TCC; la app no. Por eso ésta era la forma
+correcta, y no un demonio invisible.
+
 ### Rondas proactivas
 
 Que ella te busque a ti, no al revés:
