@@ -31,6 +31,7 @@ cleanup() {
   estado apagada
   [ -n "${KPID:-}" ] && kill "$KPID" 2>/dev/null
   [ -n "${CPID:-}" ] && kill "$CPID" 2>/dev/null
+  [ -n "${REC_PID:-}" ] && kill "$REC_PID" 2>/dev/null
   rm -rf "$TMP"; printf '\033[?25h'
 }
 # El trap de INT/TERM DEBE salir. Antes solo limpiaba y el script seguía
@@ -99,8 +100,8 @@ if [ "${1:-}" = "-m" ] || [ "${1:-}" = "--mudo" ]; then MUDO=1; shift; fi
 DESPERTADOR=0
 if [ "${1:-}" = "-e" ] || [ "${1:-}" = "--escucha" ]; then DESPERTADOR=1; shift; fi
 DORMIR_TRAS="${EV_DORMIR_TRAS:-3}"      # silencios seguidos antes de dormirse
-ESCUCHA_MAX="${EV_ESCUCHA_MAX:-4}"        # ventana fija de escucha pasiva
-ESCUCHA_MIN_AMP="${EV_ESCUCHA_MIN_AMP:-0.05}"  # piso para molestarse en transcribir
+ESCUCHA_MAX="${EV_ESCUCHA_MAX:-2}"        # ventana de escucha pasiva (corta = reacciona antes)
+ESCUCHA_MIN_AMP="${EV_ESCUCHA_MIN_AMP:-0.03}"  # piso para molestarse en transcribir
 
 
 # Cómo se le puede llamar. Whisper transcribe "E.V." de muchas formas según
@@ -422,21 +423,50 @@ escuchar() {
 # disparo y se comía justo la palabra que estamos esperando. Probado con
 # disparos de 0.1 s, 0.05 s y 0.03 s — en los tres casos "Eve" desaparecía.
 # Como no transcribe si no hubo señal, el costo en reposo es el de `rec`: 0.1%.
+# Deja el resultado en PASIVO_TEXTO en vez de imprimirlo: se llama directo y
+# no dentro de $(...), porque un subshell no puede esperar a los procesos en
+# segundo plano del padre — y aquí la grabación siguiente ya viene corriendo.
+PASIVO_TEXTO=""
+REC_PID=""
+
+_pasivo_arrancar() {
+  rec -q -r 16000 -c 1 -b 16 "$TMP/pas_b.wav" </dev/null >/dev/null 2>/dev/null \
+      trim 0 "$ESCUCHA_MAX" &
+  REC_PID=$!
+}
+
 escuchar_pasivo() {
-  local wav="$TMP/pasivo.wav"
-  rm -f "$wav"
+  PASIVO_TEXTO=""
   estado dormida
-  rec -q -r 16000 -c 1 -b 16 "$wav" </dev/null >/dev/null 2>/dev/null \
-      trim 0 "$ESCUCHA_MAX"
-  [ -s "$wav" ] || return 0
+
+  [ -z "$REC_PID" ] && _pasivo_arrancar
+  wait "$REC_PID" 2>/dev/null
+  local actual="$TMP/pas_a.wav"
+  mv -f "$TMP/pas_b.wav" "$actual" 2>/dev/null
+  # La siguiente ventana arranca YA, antes de transcribir: si se espera, el
+  # micrófono queda sordo ~10% del tiempo y justo ahí caen los "E.V." repetidos.
+  _pasivo_arrancar
+
+  [ -s "$actual" ] || return 0
+
+  # Analizar cola de la ventana anterior + la actual. Sin traslape, un "E.V."
+  # partido por el borde no aparece completo en ninguna de las dos.
+  local anal="$TMP/pas_anal.wav" cola="$TMP/pas_cola.wav"
+  if [ -f "$cola" ]; then
+    sox "$cola" "$actual" "$anal" 2>/dev/null || cp "$actual" "$anal"
+  else
+    cp "$actual" "$anal"
+  fi
+  sox "$actual" "$cola" trim -0.8 2>/dev/null || cp "$actual" "$cola"
 
   local amp
-  amp=$(sox "$wav" -n stat 2>&1 | awk '/Maximum amplitude/{print $3}')
+  amp=$(sox "$anal" -n stat 2>&1 | awk '/Maximum amplitude/{print $3}')
   awk -v a="${amp:-0}" -v m="$ESCUCHA_MIN_AMP" 'BEGIN{exit !(a < m)}' && return 0
 
-  whisper-cli -m "$MODEL" -f "$wav" -l es -nt -np --prompt "$PROMPT_WHISPER" 2>/dev/null \
+  PASIVO_TEXTO="$(whisper-cli -m "$MODEL" -f "$anal" -l es -nt -np \
+      --prompt "$PROMPT_WHISPER" 2>/dev/null \
     | tr '\n' ' ' \
-    | sed 's/\[[^]]*\]//g; s/([^)]*)//g; s/  */ /g; s/^ *//; s/ *$//'
+    | sed 's/\[[^]]*\]//g; s/([^)]*)//g; s/  */ /g; s/^ *//; s/ *$//')"
 }
 
 # ── bitácora ─────────────────────────────────────────────────
@@ -598,7 +628,8 @@ fi
 while true; do
   # Escucha pasiva: clips cortos y sin prompt en pantalla, para no llenar
   # la terminal de ruido mientras duerme.
-  texto="$(escuchar_pasivo)"
+  escuchar_pasivo
+  texto="$PASIVO_TEXTO"
   [ -z "$texto" ] && continue
 
   if ! despierta "$texto"; then
