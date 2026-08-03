@@ -216,6 +216,45 @@ git log --oneline    # qué hizo, turno por turno
 git revert HEAD      # deshacer lo último
 ```
 
+## Velocidad
+
+Tres cosas la hacen sentir viva, y ninguna cambia de modelo ni sacrifica
+calidad de respuesta:
+
+**1. Un solo proceso de `claude`, vivo entre turnos.** Arrancarlo cuesta 3–6 s
+*cada vez*. Medido: un turno mínimo, con el modelo más rápido, sin prompt y sin
+herramientas, tardaba 5.7 s — casi todo era arranque, no pensar. Con
+`--input-format stream-json` el proceso se queda vivo y eso se paga una vez.
+
+**2. Un mapa del vault en el prompt** (`indice.sh`). Sin él, casi cualquier
+pregunta la obliga a hacer Glob + Grep antes de contestar. Con él ya sabe qué
+existe y dónde, y solo abre archivos cuando necesita el contenido.
+
+**3. Pausa de silencio de 0.8 s** en vez de 1.5 s: tiempo muerto puro antes de
+siquiera empezar a procesar.
+
+Medido, misma pregunta antes y después:
+
+| | Antes | Ahora |
+|---|---|---|
+| Trivial | 3.4 s | **2.0 s** |
+| "¿existe la nota X?" | ~8 s | **2.6 s** (sin abrir nada) |
+| "¿qué hay en mi inbox?" | 11.5 s | **3.2 s** |
+
+### Lo que NO ayudó
+
+**Cambiar de modelo.** En preguntas triviales Sonnet es más rápido, pero en
+cuanto hay algo real que pensar la brecha se cierra y la calidad se cae de
+forma visible: en una pregunta socrática, Opus construyó dos preguntas
+escalonadas en 12.9 s y Sonnet una sola, más vaga, en 16.4 s. Se queda Opus.
+
+**Precalentar la sesión del día.** Cero ganancia medible — 9.2 s de mediana con
+y sin. La idea venía de malinterpretar un 9.3 s → 4.1 s que en realidad era la
+misma pregunta repetida, ya respondida en el contexto.
+
+**Cambiar de motor de voz.** Kokoro sintetiza en 0.25 s de una espera de 9 s:
+el 3%. La voz nunca fue el cuello de botella.
+
 ## Cosas que aprendí a golpes
 
 Las dejo escritas porque me costaron la noche.

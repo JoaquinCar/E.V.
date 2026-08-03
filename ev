@@ -22,7 +22,7 @@ MEM_DIR="$EV_HOME/memory"
 
 # Cuánto tolera antes de cortar (ajustables por entorno)
 MAX_SEC="${EV_MAX_SEC:-30}"     # tope duro de grabación
-PAUSA="${EV_PAUSA:-1.5}"        # silencio que cierra tu turno
+PAUSA="${EV_PAUSA:-0.8}"        # silencio que cierra tu turno (era 1.5: puro tiempo muerto)
 UMBRAL="${EV_UMBRAL:-2%}"       # qué tan fuerte cuenta como voz (sox)
 MIN_AMP="${EV_MIN_AMP:-0.02}"   # piso de señal para molestarse en transcribir
 
@@ -30,6 +30,7 @@ TMP="$(mktemp -d)"
 cleanup() {
   estado apagada
   [ -n "${KPID:-}" ] && kill "$KPID" 2>/dev/null
+  [ -n "${CPID:-}" ] && kill "$CPID" 2>/dev/null
   rm -rf "$TMP"; printf '\033[?25h'
 }
 # El trap de INT/TERM DEBE salir. Antes solo limpiaba y el script seguía
@@ -279,11 +280,27 @@ memoria_larga() {
   cat "$f"
 }
 
+# Mapa del vault en el prompt: le evita un Glob+Grep antes de cada respuesta.
+# Medido: pregunta que abre archivos ~7.6 s contra ~2.3 s de una que no.
+indice_vault() {
+  [ -f "$EV_HOME/.indice" ] || return 0
+  printf '\n\n---\n\n'
+  cat "$EV_HOME/.indice"
+}
+
+# El prompt completo, en un solo lugar para que el demonio y el modo de
+# respaldo usen exactamente el mismo (si difieren, se pierde la caché).
+prompt_sistema() {
+  cat "$EV_HOME/EV.md"
+  memoria_larga
+  indice_vault
+}
+
 _claude() {
   local pregunta="$1"; shift
   (cd "$VAULT" && claude -p "$pregunta" "$@" \
       --output-format stream-json --include-partial-messages --verbose \
-      --append-system-prompt "$(cat "$EV_HOME/EV.md")$(memoria_larga)" \
+      --append-system-prompt "$(prompt_sistema)" \
       --allowedTools "${HERRAMIENTAS[@]}" \
       ${VETADO:+--disallowedTools "${VETADO[@]}"} \
       2>>"$ERR_CLAUDE" | python3 "$EV_HOME/frases.py")
@@ -304,6 +321,47 @@ respaldar() {
     git -c user.name="E.V." -c user.email="ev@local" \
         commit -qm "E.V.: ${1:0:72}" >/dev/null 2>&1
   ) || true
+}
+
+# ── proceso de claude persistente ────────────────────────────
+# Arrancar `claude -p` cuesta ~3-6 s por turno; medido, un turno mínimo con el
+# modelo más rápido y sin herramientas tardaba 5.7 s casi todo en arranque.
+# Con el proceso vivo eso se paga una sola vez. Si falla, se cae solo al modo
+# de antes (un proceso por turno) y nadie se queda sin asistente.
+CVIVO=0; CPID=""
+claude_lanzar() {
+  [ -f "$EV_HOME/claude_daemon.py" ] || return 0
+  mkfifo "$TMP/c_in" "$TMP/c_out" 2>/dev/null || return 0
+  EV_SESSION="$SESSION" \
+  EV_RESUME="$REANUDAR" \
+  EV_SYSTEM_PROMPT="$(prompt_sistema)" \
+  EV_TOOLS="${HERRAMIENTAS[*]}" \
+  EV_DENY="$(printf '%s\n' "${VETADO[@]}")" \
+  EV_VAULT="$VAULT" \
+  EV_ERRLOG="$ERR_CLAUDE" \
+  python3 "$EV_HOME/claude_daemon.py" "$TMP/c_in" "$TMP/c_out" \
+    2>>"$ERR_CLAUDE" &
+  CPID=$!
+  exec 5>"$TMP/c_in"     # el rendezvous de los FIFOs va en este orden
+  exec 6<"$TMP/c_out"
+}
+
+claude_listo() {
+  [ "$CVIVO" = "1" ] && return 0
+  [ -n "$CPID" ] || return 1
+  local l
+  IFS= read -r l <&6 || { CPID=""; return 1; }
+  if [ "$l" = "READY" ]; then
+    CVIVO=1
+    # El demonio ya creó la sesión al arrancar.
+    if [ -z "$REANUDAR" ]; then
+      printf '%s %s\n' "$HOY" "$SESSION" > "$SESSION_FILE"
+      REANUDAR="$SESSION"
+    fi
+    return 0
+  fi
+  err "proceso persistente no arrancó ($l) — sigo con uno por turno"
+  CPID=""; return 1
 }
 
 pensar_stream() {
@@ -389,31 +447,54 @@ anotar() {
 }
 
 # ── turno completo ───────────────────────────────────────────
+# Variables del turno en curso. Globales y no locales porque _frase() las
+# muta y en bash una función solo comparte estado si NO corre en subshell.
+_RESP=""; _PRIMERA=1; _CORTADA=0
+
+# Devuelve 1 cuando hay que dejar de leer (barge-in).
+_frase() {
+  local frase="$1"
+  [ -z "$frase" ] && return 0
+  # \x01 = aviso de estado (leyendo, escribiendo…). Se pinta, no se habla.
+  if [ "${frase:0:1}" = $'\x01' ]; then
+    printf '\033[2K\033[2m   %s…\033[0m\r' "${frase:1}"
+    return 0
+  fi
+  if [ "$_PRIMERA" -eq 1 ]; then
+    printf '\033[2K\033[1;35m🔊 E.V.\033[0m '; _PRIMERA=0
+  fi
+  printf '%s ' "$frase"
+  _RESP+="$frase "
+  if [ "$_CORTADA" -eq 0 ]; then
+    decir "$frase" || { _CORTADA=1; printf '\033[2m⏹\033[0m'; return 1; }
+  fi
+  return 0
+}
+
 _intento() {
-  local pregunta="$1" frase respuesta="" primera=1 cortada=0
+  local pregunta="$1" frase
+  _RESP=""; _PRIMERA=1; _CORTADA=0
   estado pensando "$pregunta"
   printf '\033[2m   pensando…\033[0m\r'
 
-  # Process substitution, NO pipe: con un pipe el bucle corre en subshell
-  # y `respuesta` se perdería al terminar.
-  while IFS= read -r frase; do
-    [ -z "$frase" ] && continue
-    # \x01 = aviso de estado (leyendo, escribiendo…). Se pinta, no se habla.
-    if [ "${frase:0:1}" = $'\x01' ]; then
-      printf '\033[2K\033[2m   %s…\033[0m\r' "${frase:1}"
-      continue
-    fi
-    if [ "$primera" -eq 1 ]; then
-      printf '\033[2K\033[1;35m🔊 E.V.\033[0m '; primera=0
-    fi
-    printf '%s ' "$frase"
-    respuesta+="$frase "
-    if [ "$cortada" -eq 0 ]; then
-      decir "$frase" || { cortada=1; printf '\033[2m⏹\033[0m'; break; }
-    fi
-  done < <(pensar_stream "$pregunta")
+  if claude_listo; then
+    # Proceso vivo: solo se le pasa el texto y se lee hasta el fin de turno.
+    printf '%s\n' "$(tr '\n' ' ' <<< "$pregunta")" >&5
+    while IFS= read -r frase <&6; do
+      [ "$frase" = $'\x04' ] && break
+      case "$frase" in ERROR*) err "$frase"; CVIVO=0; CPID=""; break ;; esac
+      _frase "$frase" || break
+    done
+  else
+    # Respaldo: un `claude` por turno, como antes. Más lento pero funciona.
+    # Process substitution, NO pipe: con un pipe el bucle corre en subshell.
+    while IFS= read -r frase; do
+      _frase "$frase" || break
+    done < <(pensar_stream "$pregunta")
+  fi
 
-  [ "$primera" -eq 1 ] && return 1     # ni una oración: falló
+  local respuesta="$_RESP"
+  [ "$_PRIMERA" -eq 1 ] && return 1     # ni una oración: falló
   echo
   if [ -z "$REANUDAR" ]; then
     printf '%s %s\n' "$HOY" "$SESSION" > "$SESSION_FILE"
@@ -437,8 +518,13 @@ turno() {
   return 1
 }
 
-# Lo antes posible: la carga del modelo se solapa con lo que Claude tarda.
+# El índice se refresca solo si el vault cambió; en segundo plano para que
+# no frene el arranque.
+( "$EV_HOME/indice.sh" >/dev/null 2>&1 & ) 
+
+# Los dos demonios arrancan lo antes posible para solaparse entre sí.
 kokoro_lanzar
+claude_lanzar
 
 # ── modo una-sola-pregunta ───────────────────────────────────
 if [ $# -gt 0 ]; then
